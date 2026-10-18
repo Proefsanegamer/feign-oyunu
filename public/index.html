@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Feign — Çok Oyunculu</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>🏮</text></svg>">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link href="https://fonts.googleapis.com/css2?family=Alegreya+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0;overflow:hidden;background:#0d141b;color:#e6ece9;font-family:'Alegreya Sans',system-ui,sans-serif}
+.btn{min-height:54px;border-radius:14px;font-weight:800;font-size:1.05rem;border:0;color:#14181f;background:#f0b44c;touch-action:manipulation;cursor:pointer;padding:0 8px}
+.btn.alt{background:#2a3a47;color:#e6ece9}.btn.red{background:#c2543f;color:#fff}
+.btn:disabled{opacity:.3;cursor:not-allowed}.btn:focus-visible,input:focus-visible,button:focus-visible{outline:3px solid #f0b44c;outline-offset:2px}
+#log{overflow-y:auto;overscroll-behavior:contain}
+.m{padding:3px 0;font-size:.98rem;line-height:1.3}.m b{color:#f0b44c}
+.m-sys{color:#9fb3ad;font-style:italic}
+.m-priv{background:#2b2a14;border-left:3px solid #f0b44c;padding:4px 8px;border-radius:6px;margin:3px 0}
+.m-evil{color:#ff8f7d}
+#chatBody{display:none}#chatBody.open{display:flex}
+@media(min-width:768px){#chatBody{display:flex}}
+#overlay{background:rgba(8,12,18,.88)}
+.chip{padding:3px 10px;border-radius:999px;font-weight:700;font-size:.9rem}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="h-full flex flex-col md:flex-row">
+  <main class="flex-1 min-h-0 flex flex-col">
+    <header class="px-3 pt-2 pb-1 flex items-center gap-2 flex-wrap" style="background:#121b24">
+      <span id="phase" class="font-extrabold text-lg" style="color:#f0b44c">Lobi</span>
+      <span id="timer" class="text-sm opacity-80"></span>
+      <span id="roleChip" class="chip ml-auto"></span>
+      <p id="roleDesc" class="basis-full text-sm opacity-80 leading-snug"></p>
+    </header>
+    <div id="stage" class="relative flex-1 min-h-0">
+      <canvas id="cv" class="absolute inset-0 w-full h-full" style="touch-action:none"></canvas>
+      <div id="hint" class="absolute left-2 right-2 bottom-2 text-center text-sm font-bold rounded-xl px-3 py-2" style="background:rgba(13,20,27,.82)"></div>
+    </div>
+    <div class="grid grid-cols-3 gap-2 p-2" style="background:#121b24">
+      <button id="bA" class="btn"></button><button id="bB" class="btn alt"></button><button id="bC" class="btn red"></button>
+    </div>
+  </main>
+  <aside class="md:w-80 md:border-l flex flex-col min-h-0 md:h-full" style="background:#101820;border-color:#22313d">
+    <button id="chatToggle" class="md:hidden w-full text-left px-3 py-2 font-bold" style="background:#16212b">💬 Sohbet <span id="unread" class="chip" style="background:#c2543f;display:none"></span> <span class="float-right">▾</span></button>
+    <div id="chatBody" class="flex-col min-h-0 md:flex-1 h-56 md:h-auto">
+      <div id="log" class="flex-1 min-h-0 px-3 py-2"></div>
+      <div class="flex gap-2 p-2">
+        <input id="msg" maxlength="140" autocomplete="off" class="flex-1 min-w-0 rounded-lg px-3 py-2" style="background:#1b2935;color:#e6ece9;min-height:44px" placeholder="Mesaj yaz…">
+        <button id="send" class="btn" style="min-height:44px">Gönder</button>
+      </div>
+    </div>
+  </aside>
+</div>
+<div id="overlay" class="fixed inset-0 flex items-center justify-center p-4 z-50"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const TYPE_TR={good:'İyi',evil:'Kötü',neutral:'Tarafsız'};
+const ROLES={
+ doktor:{n:'Doktor',t:'good',act:1,v:'Korumak için',d:'Her gece seçtiğin kişiyi ölümden korursun. Kendini oyun boyunca en fazla 1 kez koruyabilirsin.'},
+ polis:{n:'Polis',t:'good',act:1,v:'Engellemek için',d:'Her gece seçtiğin kişinin yeteneğini engellersin.'},
+ gozlemci:{n:'Gözlemci',t:'good',act:1,v:'İzlemek için',d:'Seçtiğin evi izlersin; o gece oraya kimlerin geldiğini görürsün.'},
+ dedektif:{n:'Dedektif',t:'good',act:1,v:'Araştırmak için',d:'Seçtiğin kişinin İyi, Kötü veya Tarafsız olduğunu öğrenirsin.'},
+ vatandas:{n:'Kasabalı',t:'good',act:0,d:'Özel yeteneğin yok. Tartış, ipuçlarını birleştir, doğru kişiye oy ver.'},
+ hain:{n:'Hain',t:'evil',act:1,v:'Öldürmek için',d:'Her gece bir kişiyi öldürürsün. Geceleri Hain kanalında ekip arkadaşınla konuşabilirsin.'},
+ manip:{n:'Manipülatör',t:'evil',act:1,v:'Yönlendirmek için',d:'Seçtiğin kişinin gece hedefi rastgele başka birine kayar. Hainlerle kazanırsın.'},
+ seri:{n:'Seri Katil',t:'neutral',act:1,v:'Öldürmek için',d:'Her gece bir kişiyi öldürürsün. Tek başına hayatta kalmaya çalış.'},
+ deli:{n:'Deli',t:'neutral',act:1,d:'Gündüz oylamasında çoğunlukla asılırsan tek başına kazanırsın.'}
+};
+const store={get(){try{return JSON.parse(localStorage.getItem('feign'))}catch{return null}},set(v){try{localStorage.setItem('feign',JSON.stringify(v))}catch{}},clear(){try{localStorage.removeItem('feign')}catch{}}};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const sock=io();
+let S=null,sel=null,W=0,H=0,dpr=1,pos=[],unread=0,ovKey='',cv=$('#cv'),g=cv.getContext('2d');
+
+/* ---------- Soket olayları ---------- */
+sock.on('connect',()=>{const st=store.get();if(st)sock.emit('rejoin',st);else home()});
+sock.on('disconnect',()=>flash('Bağlantı koptu, yeniden bağlanılıyor…'));
+sock.on('joined',d=>store.set(d));
+sock.on('rejoinFail',()=>{store.clear();S=null;home()});
+sock.on('err',m=>{if(!S)home(m);else flash(m)});
+sock.on('history',l=>{$('#log').innerHTML='';l.forEach(m=>msg(m.type,m.who,m.text,true))});
+sock.on('msg',m=>msg(m.type,m.who,m.text));
+sock.on('state',s=>{
+ if(!S||S.phase!==s.phase||S.day!==s.day)sel=null;
+ S=s;render();
+});
+
+/* ---------- Ekranlar (giriş / lobi / bitiş) ---------- */
+function overlay(html,key){const o=$('#overlay');if(key===ovKey)return;ovKey=key;o.style.display=html?'flex':'none';o.innerHTML=html||''}
+function home(error){
+ ovKey='';const code=(new URLSearchParams(location.search).get('oda')||'').toUpperCase();
+ overlay(`<div class="max-w-md w-full rounded-2xl p-5" style="background:#16212b;border:1px solid #2a3a47">
+  <h1 class="text-4xl font-extrabold" style="color:#f0b44c">Feign</h1>
+  <p class="mt-1 mb-4 opacity-90">Köyde hainler var. Arkadaşlarınla canlı oyna.</p>
+  <input id="nick" maxlength="12" placeholder="Takma adın" class="w-full rounded-lg px-3 py-3 mb-3" style="background:#1b2935;color:#e6ece9">
+  <button id="mk" class="btn w-full mb-4">Oda Kur</button>
+  <div class="flex gap-2"><input id="code" maxlength="4" value="${esc(code)}" placeholder="Oda kodu" class="flex-1 min-w-0 rounded-lg px-3 py-3 uppercase tracking-widest" style="background:#1b2935;color:#e6ece9">
+  <button id="jn" class="btn alt" style="min-width:120px">Koda Göre Katıl</button></div>
+  <p id="herr" class="mt-3 text-sm" style="color:#ff8f7d;min-height:1.2em">${error?esc(error):''}</p></div>`,'home'+Math.random());
+ const nick=$('#nick');nick.value=localStorage.getItem('feign-nick')||'';
+ const nm=()=>{const v=nick.value.trim();try{localStorage.setItem('feign-nick',v)}catch{}return v};
+ $('#mk').onclick=()=>sock.emit('create',{name:nm()});
+ $('#jn').onclick=()=>sock.emit('join',{name:nm(),code:$('#code').value});
+}
+function render(){
+ const me=S.players[S.me];
+ if(S.phase==='lobby'){
+  const host=S.host===S.me,link=location.origin+location.pathname+'?oda='+S.code;
+  overlay(`<div class="max-w-md w-full rounded-2xl p-5" style="background:#16212b;border:1px solid #2a3a47">
+   <p class="text-sm opacity-80">Oda kodu</p><h2 class="text-5xl font-extrabold tracking-widest" style="color:#f0b44c">${S.code}</h2>
+   <button id="cp" class="btn alt w-full mt-2" style="min-height:44px">Davet linkini kopyala</button>
+   <p class="mt-4 mb-2 font-bold">Oyuncular (${S.players.length}/12)</p>
+   <div class="flex flex-wrap gap-2 mb-4">${S.players.map(p=>`<span class="chip" style="background:${p.id===S.me?'#f0b44c':'#2a3a47'};color:${p.id===S.me?'#10161c':'#e6ece9'}">${esc(p.name)}${p.id===S.host?' ★':''}</span>`).join('')}</div>
+   ${host?`<button id="st" class="btn w-full" ${S.players.length<4?'disabled':''}>Oyunu Başlat</button><p class="text-sm opacity-70 mt-2">${S.players.length<4?'En az 4 oyuncu gerekli.':'Hazır olduğunuzda başlat.'}</p>`:'<p class="opacity-80">Kurucunun oyunu başlatması bekleniyor…</p>'}
+   <button id="lv" class="btn alt w-full mt-3" style="min-height:44px">Odadan ayrıl</button></div>`,'lobby'+JSON.stringify(S.players.map(p=>[p.name,p.id===S.host]))+S.me);
+  $('#cp').onclick=e=>{navigator.clipboard?.writeText(link);e.target.textContent='Kopyalandı!'};
+  if(host)$('#st').onclick=()=>sock.emit('start');
+  $('#lv').onclick=()=>{store.clear();location.href=location.pathname};
+ }else if(S.phase==='over'){
+  const w=S.over,deli=w.w==='deli',col=deli?'#b78cff':w.w==='good'?'#7fa36b':w.w==='draw'?'#8a96a3':'#c2543f';
+  overlay(`<div class="max-w-md w-full rounded-2xl p-5 max-h-full overflow-auto" style="background:${deli?'linear-gradient(160deg,#2b1a4a,#16212b)':'#16212b'};border:2px solid ${col}">
+   <div class="text-5xl">${deli?'🃏':w.w==='good'?'🏮':w.w==='draw'?'🌑':'🗡️'}</div>
+   <h2 class="text-3xl font-extrabold mt-1" style="color:${col}">${esc(w.t)}</h2><p class="mt-1 mb-3">${esc(w.d)}</p>
+   <div class="grid grid-cols-2 gap-1 text-sm mb-4">${S.players.map(p=>`<div style="opacity:${p.alive?1:.55}">${p.alive?'':'✝ '}<b>${esc(p.name)}</b>: ${ROLES[p.role].n}</div>`).join('')}</div>
+   ${S.host===S.me?'<button id="ag" class="btn w-full">Lobiye Dön</button>':'<p class="opacity-80">Kurucunun yeni oyun açması bekleniyor…</p>'}</div>`,'over');
+  if(S.host===S.me)$('#ag').onclick=()=>sock.emit('again');
+ }else overlay('','game');
+ refresh();
+}
+
+/* ---------- Oyun arayüzü ---------- */
+const evil=r=>r&&ROLES[r].t==='evil';
+function canPick(i){
+ if(!S||S.phase==='lobby')return false;
+ const me=S.players[S.me],p=S.players[i];if(!me.alive||!p.alive)return false;
+ if(S.phase==='vote')return i!==S.me;
+ if(S.phase==='night'&&ROLES[me.role].act)return i!==S.me||(me.role==='doktor'&&!S.docSelf);
+ return false;
+}
+function flash(m){$('#hint').textContent=m}
+function refresh(){
+ if(!S)return;const me=S.players[S.me],ph=S.phase,live=me.alive&&ph!=='over';
+ $('#phase').textContent=({lobby:'Lobi',talk:`Gün ${S.day} · Tartışma`,vote:`Gün ${S.day} · Oylama`,trans:'Sonuç',night:`Gece ${S.day}`,over:'Oyun bitti'})[ph]+` · ${S.code}`;
+ $('#timer').textContent=S.timer?S.timer+' sn':'';
+ const chip=$('#roleChip');
+ if(me.role){const R=ROLES[me.role],c={good:'#7fa36b',evil:'#c2543f',neutral:'#8a96a3'}[R.t];
+  chip.textContent=`${R.n} · ${TYPE_TR[R.t]}`+(me.alive?'':' · Ölü');chip.style.cssText=`background:${c};color:#10161c;display:inline-block`;$('#roleDesc').textContent=R.d}
+ else{chip.style.display='none';$('#roleDesc').textContent=''}
+ const A=$('#bA'),B=$('#bB'),C=$('#bC'),R=me.role?ROLES[me.role]:{},act=live&&R.act;
+ [A,B,C].forEach(b=>b.disabled=true);
+ const rd=` (${S.readyN}/${S.needN})`;
+ if(ph==='talk'){A.textContent='Tartışma';B.textContent='Pas Geç';C.textContent=(S.ready?'Vazgeç':'Oylamaya Geç')+rd;C.disabled=!live}
+ else if(ph==='vote'){A.textContent='Oy Ver';B.textContent='Pas Geç';C.textContent='Oylar bekleniyor';A.disabled=B.disabled=!live}
+ else if(ph==='night'){A.textContent=R.act?'Yetenek Kullan':'Yeteneğin Yok';B.textContent='Vazgeç';C.textContent=(S.ready?'Bekliyorum':'Geceyi Bitir')+rd;A.disabled=B.disabled=!act;C.disabled=!live}
+ else{A.textContent='Oy Ver';B.textContent='Pas Geç';C.textContent='Sıradaki'}
+ const nm=sel!=null?S.players[sel].name:null;let t='';
+ if(ph==='talk')t=live?'Sohbette şüphelendiğin kişiyi savun ya da suçla.':'Ölüsün; yalnızca ölülerle konuşabilirsin.';
+ else if(ph==='vote')t=!live?'Ölüsün; oylamayı izliyorsun.':S.myVote===-1?'Pas geçtin.':S.myVote!=null?`Oyun: ${S.players[S.myVote].name}. İstersen değiştir.`:nm?`Seçili: ${nm}. “Oy Ver” düğmesine bas.`:'Oy vermek için bir eve dokun.';
+ else if(ph==='night')t=!live?'Ölüsün; geceyi izliyorsun.':!R.act?'Yeteneğin yok. Geceyi sakin geçir.':nm?`Seçili: ${nm}. “Yetenek Kullan” düğmesine bas.`:S.myAct!=null?`Hedefin: ${S.players[S.myAct].name}.`:`${R.v} bir eve dokun.`;
+ else if(ph==='trans')t='Gün sona erdi, gece geliyor…';
+ if(ph!=='lobby')$('#hint').textContent=t;
+ const ok=ph==='talk'||ph==='vote'||(ph==='night'&&(!me.alive||evil(me.role)));
+ $('#msg').disabled=$('#send').disabled=!ok;
+ $('#msg').placeholder=!me.alive?'Ölüler kanalı…':ph==='night'?(ok?'Hain kanalı…':'Geceleri herkes evinde.'):'Mesaj yaz…';
+}
+$('#bA').onclick=()=>{if(sel==null)return flash('Önce bir eve dokun.');
+ if(S.phase==='vote')sock.emit('vote',sel);else if(S.phase==='night')sock.emit('act',sel);sel=null;refresh()};
+$('#bB').onclick=()=>{if(S.phase==='vote')sock.emit('vote',-1);else if(S.phase==='night')sock.emit('act',null);sel=null};
+$('#bC').onclick=()=>sock.emit('ready');
+
+function msg(type,who,text,quiet){
+ const d=document.createElement('div');d.className='m m-'+type;
+ if(who){const b=document.createElement('b');b.textContent=who+': ';d.append(b)}
+ d.append(document.createTextNode((type==='evil'?'[Hain kanalı] ':type==='dead'?'[Ölüler] ':'')+text));
+ $('#log').append(d);$('#log').scrollTop=1e9;
+ if(!quiet&&!$('#chatBody').classList.contains('open')&&type!=='sys'){unread++;badge()}
+}
+function badge(){const u=$('#unread');u.textContent=unread;u.style.display=unread?'inline-block':'none'}
+$('#chatToggle').onclick=()=>{$('#chatBody').classList.toggle('open');unread=0;badge();$('#log').scrollTop=1e9};
+const send=()=>{const i=$('#msg');if(i.value.trim())sock.emit('chat',i.value);i.value=''};
+$('#send').onclick=send;$('#msg').addEventListener('keydown',e=>{if(e.key==='Enter')send()});
+
+/* ---------- Köy meydanı (Canvas) ---------- */
+function resize(){const s=$('#stage');dpr=window.devicePixelRatio||1;W=s.clientWidth;H=s.clientHeight;cv.width=W*dpr;cv.height=H*dpr}
+new ResizeObserver(resize).observe($('#stage'));
+cv.addEventListener('pointerdown',ev=>{
+ const b=cv.getBoundingClientRect(),x=ev.clientX-b.left,y=ev.clientY-b.top;let best=null,bd=1e9;
+ pos.forEach((p,i)=>{const d=Math.hypot(p.x-x,p.y-y);if(d<p.r*1.25&&d<bd){bd=d;best=i}});
+ if(best!==null){if(canPick(best)){sel=best;refresh()}else if(S.phase==='night'&&best===S.me)flash('Kendini seçemezsin.')}
+});
+function draw(t){
+ requestAnimationFrame(draw);if(!W)return;
+ const night=S&&S.phase==='night',pl=S?S.players:[],n=Math.max(pl.length,6);
+ g.setTransform(dpr,0,0,dpr,0,0);g.fillStyle=night?'#0b1220':'#1f3a33';g.fillRect(0,0,W,H);
+ const m=Math.min(W,H),s=Math.max(20,Math.min(42,m*(n>9?.065:.075))),R=m/2-s*1.9-14,cx=W/2,cy=H/2-10;if(R<20)return;
+ const gr=g.createRadialGradient(cx,cy,5,cx,cy,R*.9);gr.addColorStop(0,night?'#1d2a4a':'#58775b');gr.addColorStop(1,night?'#0b1220':'#1f3a33');
+ g.fillStyle=gr;g.beginPath();g.arc(cx,cy,R*.9,0,7);g.fill();
+ g.strokeStyle=night?'#25345a':'#6f8f6b';g.setLineDash([6,8]);g.lineWidth=2;g.beginPath();g.arc(cx,cy,R*.62,0,7);g.stroke();g.setLineDash([]);
+ g.fillStyle='#8a96a3';g.beginPath();g.arc(cx,cy,s*.75,0,7);g.fill();g.fillStyle=night?'#050a14':'#2a3a47';g.beginPath();g.arc(cx,cy,s*.5,0,7);g.fill();
+ g.textAlign='center';g.fillStyle=night?'#f0b44c':'#e6ece9';g.font=`700 ${Math.max(12,s*.4)}px 'Alegreya Sans',sans-serif`;
+ g.fillText(S&&S.day?(night?`Gece ${S.day}`:`Gün ${S.day}`):'Köy Meydanı',cx,cy+s*1.35);
+ if(!S)return;const me=S.players[S.me];pos=[];
+ pl.forEach((p,i)=>{
+  const a=Math.PI/2+((i-S.me+pl.length)%pl.length)*2*Math.PI/pl.length,x=cx+R*Math.cos(a),y=cy+R*Math.sin(a),w=s*1.5,hh=s,top=-hh/2+s*.15,bot=hh/2+s*.15;
+  pos[i]={x,y,r:s*1.3};g.save();g.translate(x,y);
+  g.fillStyle=p.alive?(night?'#3a3550':'#d9c7a0'):'#4a4f55';g.fillRect(-w/2,top,w,hh);
+  g.fillStyle=p.alive?'#b5473a':'#2f3338';g.beginPath();g.moveTo(-w/2-4,top);g.lineTo(0,top-s*.65);g.lineTo(w/2+4,top);g.closePath();g.fill();
+  g.fillStyle=p.alive?(night?'#f0b44c':'#6b5a3e'):'#2a2d31';g.fillRect(-w*.14,bot-hh*.5,w*.28,hh*.5);
+  if(!p.alive){g.strokeStyle='#c2543f';g.lineWidth=3;g.beginPath();g.moveTo(-w/2,top);g.lineTo(w/2,bot);g.moveTo(w/2,top);g.lineTo(-w/2,bot);g.stroke()}
+  if(sel===i){g.strokeStyle='#f0b44c';g.lineWidth=3+Math.sin(t/180);g.beginPath();g.arc(0,0,s*1.15,0,7);g.stroke()}
+  g.textAlign='center';g.font=`${i===S.me?800:700} ${Math.max(11,s*.42)}px 'Alegreya Sans',sans-serif`;
+  g.fillStyle=!p.alive?'#7b838b':i===S.me?'#f0b44c':'#e6ece9';g.fillText(p.name+(p.connected?'':' ⚠'),0,bot+s*.45);
+  if(!p.alive&&p.role){g.font=`500 ${Math.max(10,s*.32)}px 'Alegreya Sans',sans-serif`;g.fillStyle='#9aa4ad';g.fillText(ROLES[p.role].n,0,bot+s*.8)}
+  if(p.alive&&i!==S.me&&evil(p.role)&&evil(me.role)){g.fillStyle='#ff6b57';g.beginPath();g.arc(w/2,top-s*.3,s*.14,0,7);g.fill()}
+  if((S.phase==='vote'&&S.myVote===i)||(S.phase==='night'&&S.myAct===i)){g.fillStyle='#7fa36b';g.beginPath();g.arc(-w/2,top-s*.3,s*.26,0,7);g.fill();g.fillStyle='#10161c';g.font=`800 ${s*.34}px sans-serif`;g.fillText('✓',-w/2,top-s*.18)}
+  if(S.counts&&S.counts[i]){g.fillStyle='#c2543f';g.beginPath();g.arc(w/2,top-s*.3,s*.3,0,7);g.fill();g.fillStyle='#fff';g.font=`800 ${s*.38}px sans-serif`;g.fillText(S.counts[i],w/2,top-s*.17)}
+  g.restore();
+ });
+}
+requestAnimationFrame(draw);
+
+</script>
+</body>
+</html>
